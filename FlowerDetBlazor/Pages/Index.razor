@@ -1,0 +1,143 @@
+﻿@page "/"
+@using Microsoft.ML;
+@using System.Threading;
+@inject IJSRuntime JSRuntime
+@using System.Drawing;
+@using System.IO;
+@using System.Drawing.Imaging;
+
+
+<PageTitle>Index</PageTitle>
+
+<h1>Image Classification using ML.NET</h1>
+
+<div>
+    <InputFile OnChange="HandleFileSelection" accept="image/*" />
+</div>
+
+@if (imageBytes != null)
+{
+    <div>
+        <h4>Uploaded Image:</h4>
+        <img src="data:image;base64,@Convert.ToBase64String(imageBytes)" alt="Uploaded Image" style="max-width: 400px;" />
+    </div>
+}
+
+
+
+@if (predictionResult != null)
+{
+    <div>
+        <h4>Prediction Result:</h4>
+        <p>Category: @predictionResult.PredictedLabel</p>
+        <p>Confidence Score: @predictionResult.Score.Max().ToString("P2")</p>
+        @{
+            var rejectionRatio = CalculateRejectionRatio(predictionResult.Score);
+        }
+        <p>Rejection Ratio: @rejectionRatio.ToString("P2")</p>
+    </div>
+}
+
+@if (!string.IsNullOrEmpty(predictionThreadID))
+{
+    <p>Prediction Engine Thread ID: @predictionThreadID</p>
+    <p>Prediction Engine Thread Name: @predictionThreadName</p>
+}
+
+@if (!string.IsNullOrEmpty(uiThreadID))
+{
+    <p>UI Thread ID: @uiThreadID</p>
+    <p>UI Thread Name: @uiThreadName</p>
+}
+
+@code {
+    private byte[] imageBytes;
+    private MLModel.ModelOutput predictionResult;
+
+    private MLContext mlContext;
+    private PredictionEngine<MLModel.ModelInput, MLModel.ModelOutput> predictionEngine;
+
+    private string predictionThreadID;
+    private string predictionThreadName;
+    private string uiThreadID;
+    private string uiThreadName;
+
+    protected override async Task OnInitializedAsync()
+    {
+        // Initialize the MLContext
+        mlContext = new MLContext();
+        var modelPath = "C:\\MyFiles\\DemoCode\\MAUI\\FlowerDetBlazor\\FlowerDetBlazor\\MLModel.zip";
+
+        try
+        {
+            // Load the ML model from the specified path
+            var mlModel = mlContext.Model.Load(modelPath, out var modelSchema);
+            predictionEngine = mlContext.Model.CreatePredictionEngine<MLModel.ModelInput, MLModel.ModelOutput>(mlModel);
+        }
+        catch (Exception ex)
+        {
+            await ShowErrorMessage("Failed to load ML model: " + ex.Message);
+        }
+    }
+
+    private async Task HandleFileSelection(InputFileChangeEventArgs e)
+    {
+        try
+        {
+            var file = e.File;
+            var memoryStream = new MemoryStream();
+            await file.OpenReadStream().CopyToAsync(memoryStream);
+            imageBytes = memoryStream.ToArray();
+
+            // Create a model input using the uploaded image
+            MLModel.ModelInput sampleData = new MLModel.ModelInput()
+                {
+                    ImageSource = imageBytes,
+                };
+
+            try
+            {
+                // Perform prediction on a separate thread
+                var predictionTask = Task.Factory.StartNew(() =>
+                {
+                    predictionThreadID = Thread.CurrentThread.ManagedThreadId.ToString();
+                    predictionThreadName = Thread.CurrentThread.Name.ToString();
+                    return predictionEngine.Predict(sampleData);
+                }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+
+                predictionResult = await predictionTask;
+
+                // Update the UI on the main thread
+                uiThreadID = Thread.CurrentThread.ManagedThreadId.ToString();
+                uiThreadName = Thread.CurrentThread.Name.ToString();
+                await InvokeAsync(StateHasChanged);
+            }
+            catch (Exception ex)
+            {
+                await ShowErrorMessage("Prediction failed: " + ex.Message);
+            }
+        }
+        catch (Exception ex)
+        {
+            await ShowErrorMessage("File selection failed: " + ex.Message);
+        }
+    }
+
+    // Calculate the rejection ratio based on the prediction scores
+    private double CalculateRejectionRatio(float[] scores)
+    {
+        float maxScore = scores.Max();
+        float sumOfScores = scores.Sum();
+        float rejectionScore = sumOfScores - maxScore;
+
+        return rejectionScore / sumOfScores;
+    }
+ 
+
+
+    // Show an error message using JavaScript interop
+    private async Task ShowErrorMessage(string message)
+    {
+        await JSRuntime.InvokeVoidAsync("alert", message);
+    }
+}

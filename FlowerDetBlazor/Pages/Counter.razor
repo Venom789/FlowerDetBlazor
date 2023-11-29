@@ -1,0 +1,189 @@
+﻿@page "/counter"
+@using Microsoft.ML;
+@using System.Threading;
+@using System.Drawing;
+@using System.IO;
+@using System.Drawing.Imaging;
+@using System.Diagnostics
+@using Microsoft.AspNetCore.Hosting
+@using Microsoft.Extensions.Logging
+@inject IWebHostEnvironment Environment
+@inject IJSRuntime JSRuntime
+
+<h3>Upload Files</h3>
+
+<p>
+    <label>
+        Max file size:
+        <input type="number" @bind="maxFileSize" />
+    </label>
+</p>
+
+<p>
+    <label>
+        Max allowed files:
+        <input type="number" @bind="maxAllowedFiles" />
+    </label>
+</p>
+
+<p>
+    <label>
+        Upload up to @maxAllowedFiles of up to @maxFileSize bytes:
+        <InputFile OnChange="@LoadFiles" multiple />
+    </label>
+</p>
+
+@if (isLoading)
+{
+    <p>Uploading...</p>
+}
+
+
+
+else if (classificationResults != null)
+{
+    
+    <div>
+        <h4>Classification Results:</h4>
+        <p>Total Number of Images: @classificationResults.TotalImages</p>
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>Label</th>
+                    <th>Number of Images</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var result in classificationResults.LabelResults)
+                {
+                    <tr>
+                        <td>@result.Label</td>
+                        <td>@result.ImageCount</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+        <p>Total Time Taken: @classificationResults.TotalTimeTaken.TotalSeconds.ToString("F2") seconds</p>
+    </div>
+}
+
+
+
+
+@code {
+    private List<IBrowserFile> loadedFiles = new();
+    private long maxFileSize = 1024 * 1024;
+    private int maxAllowedFiles = 100;
+    private bool isLoading;
+    private MLContext mlContext;
+    private PredictionEngine<MLModel.ModelInput, MLModel.ModelOutput> predictionEngine;
+    private ClassificationResults classificationResults;
+    private double uploadProgress;
+
+    protected override async Task OnInitializedAsync()
+    {
+        mlContext = new MLContext();
+        var modelPath = "C:\\MyFiles\\DemoCode\\MAUI\\FlowerDetBlazor\\FlowerDetBlazor\\MLModel.zip";
+
+        try
+        {
+            var mlModel = mlContext.Model.Load(modelPath, out var modelSchema);
+            predictionEngine = mlContext.Model.CreatePredictionEngine<MLModel.ModelInput, MLModel.ModelOutput>(mlModel);
+        }
+        catch (Exception ex)
+        {
+            await ShowErrorMessage("Failed to load ML model: " + ex.Message);
+        }
+    }
+
+
+
+
+    private async Task LoadFiles(InputFileChangeEventArgs e)
+    {
+        isLoading = true;
+        loadedFiles.Clear();
+        classificationResults = null;
+
+        var stopwatch = new Stopwatch();
+        stopwatch.Start();
+
+        foreach (var file in e.GetMultipleFiles(maxAllowedFiles))
+        {
+            try
+            {
+                loadedFiles.Add(file);
+
+                var memoryStream = new MemoryStream();
+                await file.OpenReadStream(maxFileSize).CopyToAsync(memoryStream);
+                var imageBytes = memoryStream.ToArray();
+
+                // Create a model input using the uploaded image
+                MLModel.ModelInput sampleData = new MLModel.ModelInput()
+                    {
+                        ImageSource = imageBytes,
+                    };
+
+                try
+                {
+                    var predictionTask = Task.Factory.StartNew(() =>
+                    {
+                        return predictionEngine.Predict(sampleData);
+                    }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+
+                    var predictionResult = await predictionTask;
+
+                    if (classificationResults == null)
+                        classificationResults = new ClassificationResults();
+
+                    var label = predictionResult.PredictedLabel;
+                    var existingLabelResult = classificationResults.LabelResults.FirstOrDefault(lr => lr.Label == label);
+                    if (existingLabelResult != null)
+                    {
+                        existingLabelResult.ImageCount++;
+                    }
+                    else
+                    {
+                        classificationResults.LabelResults.Add(new LabelResult { Label = label, ImageCount = 1 });
+                    }
+                }
+                catch (Exception ex)
+                {
+                    await ShowErrorMessage("Prediction failed for image '" + file.Name + "': " + ex.Message);
+                }
+            }
+            catch (Exception ex)
+            {
+                await ShowErrorMessage("File loading failed: " + ex.Message);
+            }
+        }
+
+        stopwatch.Stop();
+        classificationResults.TotalImages = loadedFiles.Count;
+        classificationResults.TotalTimeTaken = stopwatch.Elapsed;
+
+        isLoading = false;
+    }
+
+
+   
+
+    
+    private async Task ShowErrorMessage(string message)
+    {
+        await JSRuntime.InvokeVoidAsync("alert", message);
+    }
+
+    public class ClassificationResults
+    {
+        public int TotalImages { get; set; }
+        public List<LabelResult> LabelResults { get; set; } = new List<LabelResult>();
+        public TimeSpan TotalTimeTaken { get; set; }
+    }
+
+    public class LabelResult
+    {
+        public string Label { get; set; }
+        public int ImageCount { get; set; }
+    }
+}
